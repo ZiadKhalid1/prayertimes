@@ -1,0 +1,230 @@
+#!/bin/sh
+
+PRAYERS="$HOME/.cache/prayertimes/prayers.yaml"
+NOTIFICATION_IDS="$HOME/.cache/prayertimes/scheduled-notifications"
+CONFIG_DIR="$HOME/.config/prayertimes/config.yaml"
+NEPRAYERS="$HOME/.cache/prayertimes/nextprayers.yaml"
+OUTPUT_FORMAT="3:04 PM"
+
+debug () 
+{
+  if [[ $DEBUG == true ]]; then
+    echo $1 1>&2
+  fi
+}
+
+get_conf()
+{
+if [[ ! -f $CONFIG_DIR ]]; then
+  cat << EOF 1>&2
+No configuration file found!
+
+Using default configurations.
+
+You can edit configurations at "$CONFIG_DIR".
+EOF
+
+  timezone=( \
+    $(timedatectl show | awk -F "=" '$1 == "Timezone" {split($2, tz, "/"); print tz[1], tz[2]}') \
+  )
+  debug "inferred timezone: "
+  debug "  country: ${timezone[0]}"
+  debug "  city: ${timezone[1]}"
+
+  mkdir -p $(dirname $CONFIG_DIR)
+  cat << EOF > $CONFIG_DIR
+location:
+  country: "${timezone[0]}"
+  city: "${timezone[1]}"
+azan-notification:
+  sound: ""
+EOF
+fi
+
+country=$(yq eval '.location.country' $CONFIG_DIR)
+city=$(yq eval '.location.city' $CONFIG_DIR)
+lat=$(yq eval '.location.lat' $CONFIG_DIR)
+long=$(yq eval '.location.long' $CONFIG_DIR)
+method=$(yq eval '.location.method' $CONFIG_DIR)
+sound=$(yq eval '.azan-notification.sound' $CONFIG_DIR)
+}
+
+query ()
+{
+  debug $1
+  cat $PRAYERS | yq "$1"
+}
+
+query_next ()
+{
+  debug $1
+  cat $NEPRAYERS | yq "$1"
+}
+
+fetch_if_required () 
+{
+  if [[ \
+    ! -f $PRAYERS || \
+    $(query ".date.gregorian.date") != "$(date +%d-%m-%Y)"  || \
+    $(date "+Y-%m-%d %H:%M" -r $CONFIG_DIR) > $(date "+Y-%m-%d %H:%M" -r $PRAYERS) \
+    ]]; then
+  mkdir -p $(dirname $PRAYERS)
+  fetch $(date '+%d-%m-%Y') > $PRAYERS
+  fetch $(date -d "+1 day" '+%d-%m-%Y') > $NEPRAYERS
+  fi
+}
+
+fetch()
+{
+  method_portion=$(
+  if [[ $method == "null" ]]; then
+    echo ""
+  else
+    echo "&method=$method"
+  fi
+  )
+  api_base=$(
+  if [[ $lat != "null" && $long != "null" ]]; then
+    echo "http://api.aladhan.com/v1/timings/$1?latitude=$lat&longitude=$long"
+  elif [[ $country != "null" && $city != "null" ]]; then
+    echo "http://api.aladhan.com/v1/timingsByCity/$1?country=$country&city=$city"
+  else
+    echo "Bad configurations!" >&2
+    exit 1
+  fi
+  )
+  if [[ $DEBUG == true ]]; then
+    echo "$api_base$method_portion" 1>&2
+  fi
+  curl -s "$api_base$method_portion" | yq --input-format json -oy '.data | .timings |= del(.Imsak, .Midnight, .Sunset, .Firstthird, .Lastthird)'
+}
+
+
+date_ar ()
+{
+  query '.date.hijri | "📅 " + .day + "-" + .month.ar + "-" + .year' 
+}
+
+date_en ()
+{
+  query '.date.hijri | "📅 " + .day + "-" + .month.en + "-" + .year' 
+}
+
+prayers_ar ()
+{
+  query '.timings' \
+    | sed \
+    's/Fajr/الفجر/;s/Sunrise/الشروق/;s/Dhuhr/الظهر/;s/Asr/العصر/;s/Sunset/الغروب/;s/Maghrib/المغرب/;s/Isha/العشاء/;'
+}
+
+prayers_en ()
+{
+    query '.timings'
+}
+
+
+prayers_yad ()
+{
+  yad --no-buttons --text "<span font-size='large'><tt>$(date_ar; prayers_ar | format_time_values | column -t)</tt></span>" --title "Prayers"
+}
+
+
+
+next_prayer () 
+{
+  next=$(query \
+    '.timings
+      | with_entries(
+      select(
+        .value | with_dtf("15:04"; to_unix) > ("'$(date "+%H:%M")'" | with_dtf("15:04"; to_unix))
+      )
+    )
+    | to_entries | .[:1] | from_entries
+    ')
+  if [[ $next == "{}" ]]; then
+    query_next \
+     '.timings
+        | to_entries | .[:1] | from_entries
+        '
+  else 
+    echo -n $next 
+  fi
+}
+
+current_prayer () 
+{
+  query \
+    '.timings
+      | with_entries(
+      select(
+        .value | with_dtf("15:04"; to_unix) <= ("'$(date "+%H:%M")'" | with_dtf("15:04"; to_unix))
+      )
+    )
+    | to_entries | .[-1:] | from_entries
+    '
+}
+
+remaining ()
+{
+  date -u -d @$(($(date -d "$1" +%s) - $(date +%s))) "+%H:%M"
+}
+
+format_time_values ()
+{
+  yq 'map_values(. | with_dtf("15:04"; format_datetime("'"$OUTPUT_FORMAT"'")))'
+}
+
+help ()
+{
+cat << EOF
+usage: 
+  prayertimes [OPTION]
+
+options:
+  -p  --prayers              Display Day's praysers
+  -pa --prayers-ar           Display prayers in Arabic
+  -pg --prayers-gui          Display in gui(using yad)
+  -n  --next-prayer          Display the next prayer
+  -c  --current-prayer       Display current prayer
+  -N  --notify               Runs the notifications service
+  -h  --help                 Display this message
+EOF
+}
+
+get_conf
+fetch_if_required
+
+
+if [[ $1 == "-p" ||  $1 == "--prayers" ]]; then
+  date_en
+  prayers_en | format_time_values
+elif [[ $1 == "-pa" ||  $1 == "--prayers-ar" ]]; then
+  date_ar
+  prayers_ar | format_time_values
+elif [[ $1 == "-pg" ||  $1 == "--prayers-gui" ]]; then
+  prayers_yad
+elif [[ $1 == "-n"  ||  $1 == "--next-prayer" ]]; then
+  next=$(next_prayer)
+  echo "$(echo $next | format_time_values) remaining ($(remaining $(echo $next | yq '.[]')))"
+elif [[ $1 == "-c"  ||  $1 == "--current-prayer" ]]; then
+  current_prayer | format_time_values
+elif [[ $1 == "-N"  ||  $1 == "--notify" ]]; then
+  while true; do
+    next=$(current_prayer)
+    prayer=$(echo $next | yq '. | to_entries | .[] |  .key')
+    prayer_time=$(echo $next | yq '. | to_entries | .[] | .value')
+    if [[ $prayer_time == $(date "+%H:%M") ]]; then
+      paplay $sound
+      child_pid=$!
+      notify-send -w -i /home/ziad/Downloads/mosque.png -a prayertimes "prayertimes" "It is $prayer time!"
+      kill $child_pid
+    fi
+    sleep 30s
+  done
+elif [[ $1 == "-h"  ||  $1 == "--help" ]]; then
+  help
+else
+  date_en
+  prayers_en | format_time_values
+fi
+
