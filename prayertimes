@@ -96,7 +96,7 @@ fetch()
   if [[ $DEBUG == true ]]; then
     echo "$api_base$method_portion" 1>&2
   fi
-  curl -s "$api_base$method_portion" | yq --input-format json -oy '.data | .timings |= del(.Imsak, .Midnight, .Sunset, .Firstthird, .Lastthird)'
+  curl -s "$api_base$method_portion" | yq --input-format json -oy '.data | del(.timings.Imsak, .timings.Midnight, .timings.Sunset, .timings.Firstthird, .timings.Lastthird)'
 }
 
 
@@ -227,4 +227,3 @@ else
   date_en
   prayers_en | format_time_values
 fi
-
