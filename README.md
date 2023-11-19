@@ -1,6 +1,12 @@
 # prayertimes
 command-line utility for retrieving and displaying prayer timings based on the user's location, supporting multiple languages.
 
+# Dependencies
+- yq
+- yad (optional for gui output)
+- libnotify (optional for sending notifications)
+- pulseaudio-utils (optional for sound output on notifiactions)
+
 # Usage
 
 ```
